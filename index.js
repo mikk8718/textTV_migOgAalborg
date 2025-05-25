@@ -1,9 +1,27 @@
 import inquirer from 'inquirer';
 import puppeteer from 'puppeteer';
 
+let isBusy = false;
+
+async function runLocked(taskFn) {
+  if (isBusy) {
+    return null;
+  }
+
+  isBusy = true;
+  try {
+    return await taskFn();
+  } catch (err) {
+    console.error("error", err.message);
+    return null;
+  } finally {
+    isBusy = false;
+  }
+}
+
 async function scrapeArticles(browser, url) {
   const page = await browser.newPage();
-  await page.goto(url, { waitUntil: 'domcontentloaded' });
+  await page.goto(url, { waitUntil: 'networkidle2' });
 
   while (true) {
     try {
@@ -35,7 +53,7 @@ async function scrapeArticles(browser, url) {
 
 async function printArticleContent(browser, url) {
   const page = await browser.newPage();
-  await page.goto(url, { waitUntil: 'domcontentloaded' });
+  await page.goto(url, { waitUntil: 'networkidle2' });
 
   const content = await page.$$eval('article p', paragraphs =>
     paragraphs.map(p => p.innerText.trim()).filter(Boolean).join('\n\n')
@@ -85,7 +103,7 @@ async function main() {
   categoryChoices.push(new inquirer.Separator(), { name: 'Exit', value: 'exit' });
 
   while (true) {
-    console.clear(); // Clear terminal before category prompt
+    console.clear();
     const { category } = await inquirer.prompt([
       {
         type: 'list',
@@ -102,14 +120,16 @@ async function main() {
 
     const categoryName = category.text;
     const categoryUrl = category.href;
-    let articles = await scrapeArticles(browser, categoryUrl);
+
+    const articles = await runLocked(() => scrapeArticles(browser, categoryUrl));
+    if (!articles || articles.length === 0) continue;
 
     while (true) {
-      const seen = new Set();
+      const seenTitles = new Set();
       const articleChoices = articles
         .filter(article => {
-          if (seen.has(article.title)) return false;
-          seen.add(article.title);
+          if (seenTitles.has(article.title)) return false;
+          seenTitles.add(article.title);
           return true;
         })
         .map(article => ({
@@ -139,7 +159,7 @@ async function main() {
         process.exit(0);
       }
 
-      await printArticleContent(browser, selectedArticle);
+      await runLocked(() => printArticleContent(browser, selectedArticle));
 
       const { afterRead } = await inquirer.prompt([
         {
