@@ -103,13 +103,20 @@ async function main() {
     const categoryName = category.text;
     const categoryUrl = category.href;
     let articles = await scrapeArticles(browser, categoryUrl);
+    console.log(articles.length);
 
     while (true) {
-      console.clear(); // Clear terminal before article list
-      const articleChoices = articles.map(article => ({
-        name: article.title,
-        value: article.link
-      }));
+      const seen = new Set();
+      const articleChoices = articles
+        .filter(article => {
+          if (seen.has(article.title)) return false;
+          seen.add(article.title);
+          return true;
+        })
+        .map(article => ({
+          name: article.title,
+          value: article.link
+        }));
 
       articleChoices.push(
         new inquirer.Separator(),
