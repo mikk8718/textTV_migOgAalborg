@@ -103,7 +103,6 @@ async function main() {
     const categoryName = category.text;
     const categoryUrl = category.href;
     let articles = await scrapeArticles(browser, categoryUrl);
-    console.log(articles.length);
 
     while (true) {
       const seen = new Set();
