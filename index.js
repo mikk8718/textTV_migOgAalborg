@@ -81,7 +81,6 @@ async function main() {
 
   const agreedCategories = [
     'Nyheder i Aalborg',
-    'Det sker i Aalborg',
     'Mad i byen',
     'Shopping',
     'Musik og kultur'
