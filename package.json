@@ -1,8 +1,10 @@
 {
   "name": "tui",
   "version": "1.0.0",
+  "type": "module",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -10,8 +12,6 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "inquirer": "^12.6.1",
-    "open": "^10.1.2",
-    "puppeteer": "^24.8.2"
+    "cheerio": "^1.1.2"
   }
 }
