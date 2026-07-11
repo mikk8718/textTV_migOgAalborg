@@ -1,9 +1,10 @@
 import { createInterface } from 'node:readline/promises';
+import { execFile } from 'node:child_process';
 import { stdin as input, stdout as output } from 'node:process';
 import * as cheerio from 'cheerio';
 
 const FRONT_PAGE_URL = 'https://migogaalborg.dk/';
-const WIDTH = 78;
+const WIDTH = 100;
 const BODY_LINES = 22;
 const ARTICLES_PER_BATCH = 8;
 const MAX_ARTICLES_PER_CATEGORY = 40;
@@ -31,6 +32,7 @@ const state = {
   articleCache: new Map(),
   currentPage: HOME_PAGE,
   currentArticlePart: 0,
+  currentArticle: null,
   previousPage: HOME_PAGE
 };
 
@@ -67,6 +69,63 @@ async function fetchJson(url) {
 
 function decodeHtml(value) {
   return cheerio.load(value).text().trim();
+}
+
+function absoluteUrl(url, baseUrl) {
+  return new URL(url, baseUrl).href;
+}
+
+function collectTextWithLinks($, node, baseUrl, links) {
+  if (node.type === 'text') {
+    return node.data || '';
+  }
+
+  if (node.type !== 'tag') {
+    return '';
+  }
+
+  const childrenText = $(node)
+    .contents()
+    .toArray()
+    .map(child => collectTextWithLinks($, child, baseUrl, links))
+    .join('');
+
+  if (node.name !== 'a') {
+    return childrenText;
+  }
+
+  const href = $(node).attr('href');
+  const label = childrenText.replace(/\s+/g, ' ').trim();
+  if (!href || !label) {
+    return childrenText;
+  }
+
+  const url = absoluteUrl(href, baseUrl);
+  const existingIndex = links.findIndex(link => link.url === url);
+  const index = existingIndex >= 0 ? existingIndex + 1 : links.push({ label, url });
+  return `${label} [${index}]`;
+}
+
+function extractArticleText($, articleUrl) {
+  const links = [];
+  const paragraphs = $('article p')
+    .map((_, paragraph) => collectTextWithLinks($, paragraph, articleUrl, links).replace(/\s+/g, ' ').trim())
+    .get()
+    .filter(Boolean);
+
+  return { paragraphs, links };
+}
+
+function openUrl(url) {
+  return new Promise((resolve, reject) => {
+    const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
+    const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
+
+    execFile(command, args, error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 function getCategoryState(category) {
@@ -125,7 +184,17 @@ function wrapText(text, maxLength = WIDTH) {
   const lines = [];
   let line = '';
 
-  for (const word of words) {
+  for (let word of words) {
+    while (word.length > maxLength) {
+      if (line) {
+        lines.push(line);
+        line = '';
+      }
+
+      lines.push(word.slice(0, maxLength));
+      word = word.slice(maxLength);
+    }
+
     if (!line) {
       line = word;
     } else if (`${line} ${word}`.length <= maxLength) {
@@ -249,18 +318,19 @@ async function loadArticle(article) {
 
   const html = await fetchPage(article.link);
   const $ = cheerio.load(html);
-  const paragraphs = $('article p')
-    .map((_, paragraph) => $(paragraph).text().trim())
-    .get()
-    .filter(Boolean);
+  const { paragraphs, links } = extractArticleText($, article.link);
   const text = paragraphs.join('\n\n') || 'Ingen artikeltekst fundet.';
+  const linkLines = links.length
+    ? ['', 'LINKS', ...links.flatMap((link, index) => wrapText(`[${index + 1}] ${link.label}: ${link.url}`))]
+    : [];
   const lines = [
     ...wrapText(article.title.toUpperCase()),
     '',
-    ...text.split('\n\n').flatMap(paragraph => [...wrapText(paragraph), ''])
+    ...text.split('\n\n').flatMap(paragraph => [...wrapText(paragraph), '']),
+    ...linkLines
   ];
   const pages = chunkLines(lines, BODY_LINES);
-  const articlePage = { ...article, pages };
+  const articlePage = { ...article, links, pages };
 
   state.articleCache.set(article.link, articlePage);
   return articlePage;
@@ -316,10 +386,13 @@ async function renderArticle(articlePage, part = 0) {
 
   const partLabel = article.pages.length > 1 ? ` ${safePart + 1}/${article.pages.length}` : '';
   const lines = article.pages[safePart].map(line => teletextLine(line, ansi.white));
-  const footerParts = ['SIDE: 100', 'TILBAGE: 0'];
+  state.currentArticle = article;
+  const footerParts = ['SIDE: 100', 'TILBAGE: 0', 'O: AABN ARTIKEL'];
 
   if (safePart > 0) footerParts.push('P: FORRIGE');
   if (safePart < article.pages.length - 1) footerParts.push('N: NÆSTE');
+  if (article.links.length === 1) footerParts.push('L1: AABN LINK');
+  if (article.links.length > 1) footerParts.push(`L1-L${article.links.length}: AABN LINK`);
 
   footerParts.push('AFSLUT: Q');
   renderFrame(article.page, `${article.title.toUpperCase()}${partLabel}`, lines, footerParts.join('  '));
@@ -345,6 +418,7 @@ async function renderPage(page) {
   if (page === HOME_PAGE) {
     state.previousPage = state.currentPage;
     state.currentPage = HOME_PAGE;
+    state.currentArticle = null;
     renderHome();
     return;
   }
@@ -353,6 +427,7 @@ async function renderPage(page) {
   if (category) {
     state.previousPage = state.currentPage;
     state.currentPage = page;
+    state.currentArticle = null;
     await renderCategory(category);
     return;
   }
@@ -401,6 +476,78 @@ async function loadMoreForCurrentCategory() {
   await renderCategory(category);
 }
 
+async function openCurrentArticle() {
+  if (!state.currentArticle) {
+    renderFrame(400, 'INGEN ARTIKEL', [
+      teletextLine('O kan kun bruges på en artikel.', ansi.red),
+      '',
+      teletextLine('Vælg først en artikelside som 111.', ansi.white)
+    ], 'SIDE: 100  TILBAGE: 0  AFSLUT: Q');
+    return;
+  }
+
+  try {
+    await openUrl(state.currentArticle.link);
+  } catch (err) {
+    renderFrame(500, 'KUNNE IKKE AABNE ARTIKEL', [
+      teletextLine(err.message, ansi.red),
+      '',
+      teletextLine(state.currentArticle.link, ansi.white)
+    ], 'SIDE: 100  TILBAGE: 0  AFSLUT: Q');
+    return;
+  }
+
+  await renderArticle(state.currentArticle, state.currentArticlePart);
+}
+
+function renderArticleLinkHelp(article) {
+  const lines = [
+    teletextLine('LINKS I DENNE ARTIKEL', ansi.yellow),
+    '',
+    ...article.links.flatMap((link, index) => [
+      teletextLine(`L${index + 1}  ${link.label}`, ansi.cyan),
+      ...wrapText(link.url).map(line => teletextLine(line, ansi.white))
+    ])
+  ];
+
+  renderFrame(article.page, 'ARTIKEL-LINKS', lines, 'BRUG L1, L2 ...  TILBAGE: 0  AFSLUT: Q');
+}
+
+async function openCurrentArticleLink(index) {
+  if (!state.currentArticle) {
+    renderFrame(400, 'INGEN ARTIKEL', [
+      teletextLine('L# kan kun bruges på en artikel.', ansi.red),
+      '',
+      teletextLine('Vælg først en artikelside som 111.', ansi.white)
+    ], 'SIDE: 100  TILBAGE: 0  AFSLUT: Q');
+    return;
+  }
+
+  const article = await loadArticle(state.currentArticle);
+  const link = article.links[index - 1];
+  if (!link) {
+    renderFrame(404, 'LINK FINDES IKKE', [
+      teletextLine(`Link ${index} findes ikke i artiklen.`, ansi.red),
+      '',
+      teletextLine('Brug L for liste eller L1, L2 osv. for artikel-links.', ansi.white)
+    ], 'SIDE: 100  TILBAGE: 0  AFSLUT: Q');
+    return;
+  }
+
+  try {
+    await openUrl(link.url);
+  } catch (err) {
+    renderFrame(500, 'KUNNE IKKE AABNE LINK', [
+      teletextLine(err.message, ansi.red),
+      '',
+      teletextLine(link.url, ansi.white)
+    ], 'SIDE: 100  TILBAGE: 0  AFSLUT: Q');
+    return;
+  }
+
+  await renderArticle(article, state.currentArticlePart);
+}
+
 async function handleCommand(command) {
   const normalized = command.trim().toLowerCase();
   if (!normalized) return renderPage(state.currentPage);
@@ -408,6 +555,19 @@ async function handleCommand(command) {
   if (normalized === 'r') return refreshCurrentPage();
   if (normalized === '0') return renderPage(state.previousPage || HOME_PAGE);
   if (normalized === 'm') return loadMoreForCurrentCategory();
+  if (normalized === 'o') return openCurrentArticle();
+
+  if (normalized === 'l' || normalized === 'l#') {
+    if (!state.currentArticle) return openCurrentArticleLink(1);
+
+    const article = await loadArticle(state.currentArticle);
+    if (article.links.length === 1 && normalized === 'l') return openCurrentArticleLink(1);
+    if (article.links.length) return renderArticleLinkHelp(article);
+    return openCurrentArticleLink(1);
+  }
+
+  const linkMatch = normalized.match(/^l(\d+)$/);
+  if (linkMatch) return openCurrentArticleLink(Number(linkMatch[1]));
 
   const currentArticle = findArticle(state.currentPage);
   if (currentArticle && normalized === 'n') {
@@ -422,7 +582,7 @@ async function handleCommand(command) {
     renderFrame(400, 'UKENDT KOMMANDO', [
       teletextLine(`Ukendt kommando: ${command}`, ansi.red),
       '',
-      teletextLine('Brug sidetal, 0, M, R, N, P eller Q.', ansi.white)
+      teletextLine('Brug sidetal, 0, M, R, N, P, O, L eller L1 osv.', ansi.white)
     ], 'SIDE: 100  TILBAGE: 0  AFSLUT: Q');
     return;
   }
